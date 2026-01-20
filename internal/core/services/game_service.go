@@ -13,17 +13,18 @@ type service struct {
 	repo ports.GameRepository
 }
 
-func (s *service) NewService(repo ports.GameRepository) ports.GameService {
+func NewService(repo ports.GameRepository) ports.GameService {
 	return &service{
 		repo: repo,
 	}
 }
 
-func (s *service) CreateGame(ctx context.Context, WhiteID, BlackId string) (*domain.Game, error) {
+func (s *service) CreateGame(ctx context.Context, whiteId, blackId string) (*domain.Game, error) {
 	newGame := &domain.Game{
 		ID:        uuid.New(),
 		Board:     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", // Standard starting FEN
 		State:     domain.GameState{IsOver: false, Turn: "white"},
+		Players:   domain.Players{WhiteId: whiteId, BlackId: blackId},
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
