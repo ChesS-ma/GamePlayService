@@ -1,32 +1,9 @@
 # Binaries
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
 bin/
-dist/
 
-# Test binary
-*.test
-
-# Go workspace
-vendor/
-*.sum
-
-# Environment variables
-.env
-.env.local
-
-# IDE
-.vscode/
+# IDEs
 .idea/
-*.swp
-*.swo
+*.iml
 
-# Logs
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
+# Notes
+GEMINI.md
