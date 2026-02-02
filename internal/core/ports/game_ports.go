@@ -6,16 +6,21 @@ import (
 	"github.com/google/uuid"
 )
 
-// GameRepository is a "Driven Port". It defines what we need from our database.
 type GameRepository interface {
 	Save(ctx context.Context, game *domain.Game) error
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.Game, error)
 	Update(ctx context.Context, game *domain.Game) error
+	Delete(ctx context.Context, id uuid.UUID) error
 }
 
-// GameService is a "Driving Port". It defines what the application can actually DO.
+// New Archive Port for MongoDB
+type GameArchiveRepository interface {
+	Archive(ctx context.Context, game *domain.Game) error
+}
+
 type GameService interface {
 	CreateGame(ctx context.Context, whiteId, blackId string) (*domain.Game, error)
-	MakeMove(ctx context.Context, gameId uuid.UUID, move domain.Move) (*domain.Game, error)
+	// Updated to take playerID for turn validation
+	MakeMove(ctx context.Context, gameId uuid.UUID, playerID string, moveNotation string) (*domain.Game, error)
 	GetGame(ctx context.Context, gameId uuid.UUID) (*domain.Game, error)
 }
