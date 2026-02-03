@@ -33,12 +33,14 @@ func main() {
 	// 3. Initialize Service (Injecting BOTH repos)
 	gameService := services.NewService(redisRepo, mongoRepo)
 
-	// 4. Initialize Handler
+	// 4. Initialize Handler (Injecting the game Service )
 	gameHandler := gamehttp.NewGameHandler(gameService)
+	wsHandler := gamehttp.NewWsHandler(gameService)
 
 	// 5. Routes
 	http.HandleFunc("/games/create", gameHandler.CreateGame)
-	http.HandleFunc("/games/move", gameHandler.MakeMove)
+	// WebSocket Route (The "Live" connection for playing)
+	http.HandleFunc("/ws", wsHandler.HandleWS)
 	http.HandleFunc("/games/get", gameHandler.GetGame)
 
 	log.Println("Chess Service running on :8080")
