@@ -9,13 +9,14 @@ import (
 )
 
 type Game struct {
-	ID        uuid.UUID   `json:"id"`
-	White     Participant `json:"white"`
-	Black     Participant `json:"black"`
-	Settings  TimeControl `json:"settings"`
-	History   []Move      `json:"history"`
-	CreatedAt time.Time   `json:"created_at"`
-	UpdatedAt time.Time   `json:"updated_at"`
+	ID         uuid.UUID   `json:"id"`
+	White      Participant `json:"white"`
+	Black      Participant `json:"black"`
+	Settings   TimeControl `json:"settings"`
+	History    []Move      `json:"history"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
+	CurrentFEN string      `json:"current_fen"` // Add this!
 
 	WinnerID     string `json:"winner_id,omitempty"` // "" for draw, or the player's UserID
 	ResultReason string `json:"result_reason"`       // "CHECKMATE", "TIMEOUT", "STALEMATE", etc.
@@ -44,7 +45,6 @@ func NewGame(whiteID, blackID string, tc TimeControl) *Game {
 	return game
 }
 
-// MakeMove validates and applies a move in Algebraic Notation (e.g., "e4")
 func (g *Game) MakeMove(playerID string, moveNotation string) error {
 	if g.IsFinished || g.IsGameOver() {
 		return errors.New("game is already finished")
@@ -53,8 +53,7 @@ func (g *Game) MakeMove(playerID string, moveNotation string) error {
 	now := time.Now()
 	currentTurn := g.internalGame.Position().Turn()
 
-	// 1. CLOCK LOGIC
-	// Only calculate thinkTime if this is NOT the first move of the game
+	// 1. CLOCK LOGIC & TIMEOUT PROTECTION
 	if len(g.History) > 0 {
 		thinkTime := now.Sub(g.UpdatedAt)
 
@@ -64,43 +63,46 @@ func (g *Game) MakeMove(playerID string, moveNotation string) error {
 			}
 			g.White.TimeRemaining -= thinkTime
 			g.White.TimeRemaining += time.Duration(g.Settings.Increment) * time.Second
+
+			// Check White's timeout specifically
+			if g.White.TimeRemaining <= 0 {
+				g.White.TimeRemaining = 0
+				g.White.SyncTime()
+				g.Black.SyncTime() // Sync Black so they keep their remaining time
+				g.finishGame(g.Black.UserID, "TIMEOUT")
+				return nil
+			}
 		} else {
 			if playerID != g.Black.UserID {
 				return errors.New("it is not your turn")
 			}
 			g.Black.TimeRemaining -= thinkTime
 			g.Black.TimeRemaining += time.Duration(g.Settings.Increment) * time.Second
+
+			// Check Black's timeout specifically
+			if g.Black.TimeRemaining <= 0 {
+				g.Black.TimeRemaining = 0
+				g.Black.SyncTime()
+				g.White.SyncTime() // Sync White so they keep their remaining time
+				g.finishGame(g.White.UserID, "TIMEOUT")
+				return nil
+			}
 		}
 	} else {
-		// FIRST MOVE: No time is subtracted.
-		// Just verify the right player is starting.
+		// First move: Just verify the player is White
 		if playerID != g.White.UserID {
 			return errors.New("white must start the game")
 		}
 	}
 
-	// 2. TIMEOUT PROTECTION
-	// If a player hits 0, they lose.
-	if g.White.TimeRemaining <= 0 {
-		g.White.TimeRemaining = 0
-		g.White.SyncTime()
-		g.finishGame(g.Black.UserID, "TIMEOUT")
-		return nil
-	}
-	if g.Black.TimeRemaining <= 0 {
-		g.Black.TimeRemaining = 0
-		g.Black.SyncTime()
-		g.finishGame(g.White.UserID, "TIMEOUT")
-		return nil
-	}
-
-	// 3. APPLY TO ENGINE
+	// 2. APPLY TO ENGINE
 	err := g.internalGame.MoveStr(moveNotation)
 	if err != nil {
 		return errors.New("invalid move format")
 	}
 
-	// 4. UPDATE STATE
+	// Update FEN and History
+	g.CurrentFEN = g.internalGame.FEN()
 	g.History = append(g.History, Move{
 		FENBefore: g.GetFEN(),
 		Notation:  moveNotation,
@@ -108,12 +110,14 @@ func (g *Game) MakeMove(playerID string, moveNotation string) error {
 		Timestamp: now,
 	})
 
-	// Sync the float64 fields for JSON
+	// Sync durations for JSON (if move was successful and no timeout)
 	g.White.SyncTime()
 	g.Black.SyncTime()
 
+	// 3. CHECK FOR ENGINE GAME OVER (Checkmate/Draw)
 	if g.IsGameOver() {
 		outcome := g.internalGame.Outcome()
+		reason := g.internalGame.Method().String()
 		var winner string
 		if outcome == chess.WhiteWon {
 			winner = g.White.UserID
@@ -122,13 +126,100 @@ func (g *Game) MakeMove(playerID string, moveNotation string) error {
 		} else {
 			winner = "DRAW"
 		}
-		g.finishGame(winner, g.internalGame.Method().String())
+		g.finishGame(winner, reason)
 	}
 
-	// 5. IMPORTANT: Reset the clock start point for the NEXT move
 	g.UpdatedAt = now
 	return nil
 }
+
+// // MakeMove validates and applies a move in Algebraic Notation (e.g., "e4")
+//
+//	func (g *Game) MakeMove(playerID string, moveNotation string) error {
+//		if g.IsFinished || g.IsGameOver() {
+//			return errors.New("game is already finished")
+//		}
+//
+//		now := time.Now()
+//		currentTurn := g.internalGame.Position().Turn()
+//
+//		// 1. CLOCK LOGIC
+//		// Only calculate thinkTime if this is NOT the first move of the game
+//		if len(g.History) > 0 {
+//			thinkTime := now.Sub(g.UpdatedAt)
+//
+//			if currentTurn == chess.White {
+//				if playerID != g.White.UserID {
+//					return errors.New("it is not your turn")
+//				}
+//				g.White.TimeRemaining -= thinkTime
+//				g.White.TimeRemaining += time.Duration(g.Settings.Increment) * time.Second
+//			} else {
+//				if playerID != g.Black.UserID {
+//					return errors.New("it is not your turn")
+//				}
+//				g.Black.TimeRemaining -= thinkTime
+//				g.Black.TimeRemaining += time.Duration(g.Settings.Increment) * time.Second
+//			}
+//		} else {
+//			// FIRST MOVE: No time is subtracted.
+//			// Just verify the right player is starting.
+//			if playerID != g.White.UserID {
+//				return errors.New("white must start the game")
+//			}
+//		}
+//
+//		// 2. TIMEOUT PROTECTION
+//		// If a player hits 0, they lose.
+//		if g.White.TimeRemaining <= 0 {
+//			g.White.TimeRemaining = 0
+//			g.White.SyncTime()
+//			g.finishGame(g.Black.UserID, "TIMEOUT")
+//			return nil
+//		}
+//		if g.Black.TimeRemaining <= 0 {
+//			g.Black.TimeRemaining = 0
+//			g.Black.SyncTime()
+//			g.finishGame(g.White.UserID, "TIMEOUT")
+//			return nil
+//		}
+//
+//		// 3. APPLY TO ENGINE
+//		err := g.internalGame.MoveStr(moveNotation)
+//		if err != nil {
+//			return errors.New("invalid move format")
+//		}
+//		g.CurrentFEN = g.internalGame.FEN() // Save the new position string
+//
+//		// 4. UPDATE STATE
+//		g.History = append(g.History, Move{
+//			FENBefore: g.GetFEN(),
+//			Notation:  moveNotation,
+//			PlayerID:  playerID,
+//			Timestamp: now,
+//		})
+//
+//		// Sync the float64 fields for JSON
+//		g.White.SyncTime()
+//		g.Black.SyncTime()
+//
+//		if g.IsGameOver() {
+//			outcome := g.internalGame.Outcome()
+//			var winner string
+//			if outcome == chess.WhiteWon {
+//				winner = g.White.UserID
+//			} else if outcome == chess.BlackWon {
+//				winner = g.Black.UserID
+//			} else {
+//				winner = "DRAW"
+//			}
+//			g.finishGame(winner, g.internalGame.Method().String())
+//		}
+//
+//		// 5. IMPORTANT: Reset the clock start point for the NEXT move
+//		g.UpdatedAt = now
+//		return nil
+//	}
 func (g *Game) finishGame(winnerID string, reason string) {
 	g.IsFinished = true
 	g.WinnerID = winnerID

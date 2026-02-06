@@ -18,7 +18,7 @@ type Participant struct {
 	UserID string       `json:"user_id"`
 	Status PlayerStatus `json:"status"`
 	// We keep this unexported (lowercase) or tagged with "-" so it stays out of JSON
-	TimeRemaining time.Duration `json:"-"`
+	TimeRemaining time.Duration `json:"time_remaining_raw"`
 	// This is what the frontend will see
 	TimeFormatted float64 `json:"time_remaining"`
 }
