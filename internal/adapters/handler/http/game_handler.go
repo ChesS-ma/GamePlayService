@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"github.com/ChesS-ma/gameplay_service/internal/core/domain"
 	"github.com/ChesS-ma/gameplay_service/internal/core/ports"
 	"github.com/google/uuid" // Needed to parse IDs
 	"net/http"
@@ -20,8 +21,9 @@ func NewGameHandler(service ports.GameService) *GameHandler {
 // --- Request DTOs ---
 
 type CreateGameRequest struct {
-	WhiteId string `json:"white_id"`
-	BlackId string `json:"black_id"`
+	WhiteId  string             `json:"white_id"`
+	BlackId  string             `json:"black_id"`
+	Settings domain.TimeControl `json:"settings"`
 }
 
 type MakeMoveRequest struct {
@@ -41,7 +43,7 @@ func (h *GameHandler) CreateGame(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	game, err := h.service.CreateGame(r.Context(), req.WhiteId, req.BlackId)
+	game, err := h.service.CreateGame(r.Context(), req.WhiteId, req.BlackId, req.Settings)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

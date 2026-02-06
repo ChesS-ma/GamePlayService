@@ -19,7 +19,7 @@ type GameArchiveRepository interface {
 }
 
 type GameService interface {
-	CreateGame(ctx context.Context, whiteId, blackId string) (*domain.Game, error)
+	CreateGame(ctx context.Context, whiteId, blackId string, tc domain.TimeControl) (*domain.Game, error)
 	// Updated to take playerID for turn validation
 	MakeMove(ctx context.Context, gameId uuid.UUID, playerID string, moveNotation string) (*domain.Game, error)
 	GetGame(ctx context.Context, gameId uuid.UUID) (*domain.Game, error)
