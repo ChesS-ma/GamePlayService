@@ -2,6 +2,10 @@ package services
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"sync"
+
 	"github.com/ChesS-ma/gameplay_service/internal/core/domain"
 	"github.com/ChesS-ma/gameplay_service/internal/core/ports"
 	"github.com/google/uuid"
@@ -10,12 +14,48 @@ import (
 type service struct {
 	repo    ports.GameRepository        // Usually Redis
 	archive ports.GameArchiveRepository // Usually MongoDB
+
+	mu    sync.Mutex
+	locks map[uuid.UUID]*gameLock
+}
+
+// gameLock serializes moves for a single game. Entries are reference counted
+// so the map does not grow for the lifetime of the process.
+type gameLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockGame blocks until this game is free and returns its release function.
+func (s *service) lockGame(id uuid.UUID) func() {
+	s.mu.Lock()
+	l, ok := s.locks[id]
+	if !ok {
+		l = &gameLock{}
+		s.locks[id] = l
+	}
+	l.refs++
+	s.mu.Unlock()
+
+	l.mu.Lock()
+
+	return func() {
+		l.mu.Unlock()
+
+		s.mu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(s.locks, id)
+		}
+		s.mu.Unlock()
+	}
 }
 
 func NewService(repo ports.GameRepository, archive ports.GameArchiveRepository) ports.GameService {
 	return &service{
 		repo:    repo,
 		archive: archive,
+		locks:   make(map[uuid.UUID]*gameLock),
 	}
 }
 
@@ -28,66 +68,52 @@ func (s *service) CreateGame(ctx context.Context, whiteId, blackId string, tc do
 	return newGame, nil
 }
 
-//	func (s *service) MakeMove(ctx context.Context, gameId uuid.UUID, playerID string, moveNotation string) (*domain.Game, error) {
-//		// 1. Fetch current state from Redis
-//		game, err := s.repo.FindByID(ctx, gameId)
-//		if err != nil {
-//			return nil, err
-//		}
-//
-//		// 2. Apply move (Business Logic inside Domain)
-//		if err := game.MakeMove(playerID, moveNotation); err != nil {
-//			return nil, err
-//		}
-//
-//		// 3. Orchestrate Persistence
-//		if game.IsGameOver() {
-//			// Store in MongoDB permanently
-//			_ = s.archive.Archive(ctx, game)
-//			// Clean up Redis
-//			_ = s.repo.Delete(ctx, gameId)
-//		} else {
-//			// Update Redis for next move
-//			if err := s.repo.Update(ctx, game); err != nil {
-//				return nil, err
-//			}
-//		}
-//
-//		return game, nil
-//	}
 func (s *service) MakeMove(ctx context.Context, gameId uuid.UUID, playerID string, moveNotation string) (*domain.Game, error) {
+	// One game is mutated by two players over separate connections. Without a
+	// per-game lock the read-modify-write against Redis loses moves.
+	unlock := s.lockGame(gameId)
+	defer unlock()
+
 	game, err := s.repo.FindByID(ctx, gameId)
 	if err != nil {
 		return nil, err
 	}
 
-	// --- REHYDRATE ENGINE ---
-	fen := game.CurrentFEN
-	if fen == "" {
-		fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+	// The chess engine is unexported and does not survive serialization, so it
+	// has to be rebuilt from the stored FEN before the domain can validate.
+	if err := game.RehydrateEngine(game.CurrentFEN); err != nil {
+		return nil, fmt.Errorf("restoring game %s: %w", gameId, err)
 	}
-	game.RehydrateEngine(fen) // Rebuild the chess logic engine
-	// ------------------------
 
 	if err := game.MakeMove(playerID, moveNotation); err != nil {
 		return nil, err
 	}
 
-	// ... persistence logic (Update Redis or Archive) ...
-	s.repo.Save(ctx, game)
+	// Keep the finished game in Redis so clients can still read the final
+	// position; its TTL cleans it up. Mongo holds the permanent record.
+	if err := s.repo.Update(ctx, game); err != nil {
+		return nil, fmt.Errorf("saving game %s: %w", gameId, err)
+	}
+
+	if game.IsFinished {
+		// A failed archive must not fail the move that just ended the game.
+		if err := s.archive.Archive(ctx, game); err != nil {
+			log.Printf("archiving game %s failed: %v", gameId, err)
+		}
+	}
+
 	return game, nil
 }
+
 func (s *service) GetGame(ctx context.Context, gameId uuid.UUID) (*domain.Game, error) {
 	game, err := s.repo.FindByID(ctx, gameId)
 	if err != nil {
 		return nil, err
 	}
 
-	// Use the stored FEN to rebuild the engine
-	if game.CurrentFEN == "" {
-		game.CurrentFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+	if err := game.RehydrateEngine(game.CurrentFEN); err != nil {
+		return nil, fmt.Errorf("restoring game %s: %w", gameId, err)
 	}
-	game.RehydrateEngine(game.CurrentFEN)
 
 	return game, nil
 }

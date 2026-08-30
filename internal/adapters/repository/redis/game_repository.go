@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/ChesS-ma/gameplay_service/internal/core/domain"
@@ -25,7 +26,10 @@ type redisGameModel struct {
 }
 
 func (r *RedisGameRepository) Save(ctx context.Context, game *domain.Game) error {
-	data, _ := json.Marshal(redisGameModel{Game: game, FEN: game.GetFEN()})
+	data, err := json.Marshal(redisGameModel{Game: game, FEN: game.GetFEN()})
+	if err != nil {
+		return err
+	}
 	return r.client.Set(ctx, "game:"+game.ID.String(), data, 24*time.Hour).Err()
 }
 
@@ -35,8 +39,15 @@ func (r *RedisGameRepository) FindByID(ctx context.Context, id uuid.UUID) (*doma
 		return nil, err
 	}
 	var model redisGameModel
-	json.Unmarshal(data, &model)
-	model.Game.RehydrateEngine(model.FEN)
+	if err := json.Unmarshal(data, &model); err != nil {
+		return nil, err
+	}
+	if model.Game == nil {
+		return nil, errors.New("corrupt game record in redis")
+	}
+	if err := model.Game.RehydrateEngine(model.FEN); err != nil {
+		return nil, err
+	}
 	return model.Game, nil
 }
 
