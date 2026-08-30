@@ -1,0 +1,96 @@
+name: Go CI for the Gameplay Service
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Fast feedback: formatting, vet, and the unit suite under the race detector.
+  # Needs no infrastructure, so it fails in under a minute when something basic
+  # is wrong.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.4'
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Unit tests
+        run: go test -race -count=1 ./...
+
+  # The integration suite drives the service over real Redis and MongoDB, the
+  # same way docker-compose.yml does locally.
+  integration:
+    runs-on: ubuntu-latest
+    needs: unit
+
+    services:
+      redis:
+        image: redis:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      mongodb:
+        image: mongo:latest
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.4'
+          cache: true
+
+      # These tests skip when the infrastructure is missing, which is right
+      # locally but would hide a broken suite in CI. Fail loudly instead.
+      - name: Integration tests
+        run: go test -tags=integration -count=1 -v ./tests/... 2>&1 | tee results.txt
+        env:
+          REDIS_ADDR: localhost:6379
+          MONGO_URI: mongodb://localhost:27017
+
+      - name: Fail if any test was skipped
+        run: |
+          if grep -q -- "--- SKIP" results.txt; then
+            echo "Integration tests skipped in CI — Redis or Mongo was unreachable:"
+            grep -- "--- SKIP" results.txt
+            exit 1
+          fi
