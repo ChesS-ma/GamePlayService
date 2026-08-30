@@ -17,7 +17,15 @@ type Client struct {
 	GameID   uuid.UUID
 	PlayerID string
 	Conn     *websocket.Conn
-	Send     chan []byte // Channel for messages to be sent to the browser
+	Send     chan []byte   // Channel for messages to be sent to the browser
+	Done     chan struct{} // Closed once when the client is torn down
+	once     sync.Once     // Guards Done against a double close
+}
+
+// close signals every goroutine holding this client to stop. Safe to call
+// more than once and from several goroutines.
+func (c *Client) close() {
+	c.once.Do(func() { close(c.Done) })
 }
 
 // WsEvent defines the envelope for all socket messages
@@ -65,6 +73,7 @@ func (h *WsHandler) HandleWS(w http.ResponseWriter, r *http.Request) {
 		PlayerID: playerID,
 		Conn:     conn,
 		Send:     make(chan []byte, 256),
+		Done:     make(chan struct{}),
 	}
 
 	h.registerClient(client)
@@ -89,7 +98,10 @@ func (h *WsHandler) HandleWS(w http.ResponseWriter, r *http.Request) {
 	msg, _ := json.Marshal(syncEvent)
 
 	// The writePump is now active and will immediately pick this up
-	client.Send <- msg
+	select {
+	case client.Send <- msg:
+	case <-client.Done:
+	}
 }
 
 func (h *WsHandler) readPump(c *Client) {
@@ -164,10 +176,15 @@ func (h *WsHandler) writePump(c *Client) {
 	for {
 		select {
 		// 2. This case handles actual game messages (moves, etc.)
+		case <-c.Done:
+			// Client was unregistered: say goodbye and stop.
+			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+
 		case message, ok := <-c.Send:
 			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if !ok {
-				// The Hub closed the channel, send a close message to browser
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
@@ -195,32 +212,53 @@ func (h *WsHandler) registerClient(c *Client) {
 
 func (h *WsHandler) unregisterClient(c *Client) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	removed := false
 	clients := h.rooms[c.GameID]
 	for i, client := range clients {
 		if client == c {
 			// Remove the client from the slice
 			h.rooms[c.GameID] = append(clients[:i], clients[i+1:]...)
-			// Notify the room that a specific player is gone
-			// doing this while still holding the lock for safety
-			h.broadcastToRoom(c.GameID, "PLAYER_DISCONNECTED", map[string]string{
-				"player_id": c.PlayerID,
-			})
+			if len(h.rooms[c.GameID]) == 0 {
+				delete(h.rooms, c.GameID)
+			}
+			removed = true
 			break
 		}
 	}
+	h.mu.Unlock()
+
+	// Signal writePump to exit. We never close c.Send: a broadcast that copied
+	// the room slice just before removal would panic sending on a closed chan.
+	c.close()
+
+	// Notify the room AFTER releasing the lock. broadcastToRoom takes a read
+	// lock, and sync.RWMutex is not reentrant: doing this while holding the
+	// write lock deadlocks the goroutine and wedges the rooms map for good.
+	if removed {
+		h.broadcastToRoom(c.GameID, "PLAYER_DISCONNECTED", map[string]string{
+			"player_id": c.PlayerID,
+		})
+	}
 }
 func (h *WsHandler) broadcastToRoom(gameID uuid.UUID, eventType string, payload interface{}) {
-	h.mu.RLock()
-	clients := h.rooms[gameID]
-	h.mu.RUnlock()
-
 	data, _ := json.Marshal(payload)
 	event := WsEvent{Type: eventType, Payload: data}
 	msg, _ := json.Marshal(event)
 
+	h.mu.RLock()
+	// Copy the slice so we are not iterating shared state once the lock is gone
+	clients := make([]*Client, len(h.rooms[gameID]))
+	copy(clients, h.rooms[gameID])
+	h.mu.RUnlock()
+
 	for _, client := range clients {
-		client.Send <- msg
+		// Never block the broadcaster on a slow or dead client
+		select {
+		case client.Send <- msg:
+		case <-client.Done:
+		default:
+			log.Printf("dropping message for player %s: send buffer full", client.PlayerID)
+		}
 	}
 }
 func (h *WsHandler) sendError(c *Client, msg string) {
@@ -228,5 +266,9 @@ func (h *WsHandler) sendError(c *Client, msg string) {
 	payload := []byte(`"` + msg + `"`)
 	event := WsEvent{Type: "ERROR", Payload: payload}
 	data, _ := json.Marshal(event)
-	c.Send <- data
+	select {
+	case c.Send <- data:
+	case <-c.Done:
+	default:
+	}
 }
