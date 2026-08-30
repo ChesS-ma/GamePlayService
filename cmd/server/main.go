@@ -38,11 +38,8 @@ func main() {
 	wsHandler := gamehttp.NewWsHandler(gameService)
 
 	// 5. Routes
-	http.HandleFunc("/games/create", gameHandler.CreateGame)
-	// WebSocket Route (The "Live" connection for playing)
-	http.HandleFunc("/ws", wsHandler.HandleWS)
-	http.HandleFunc("/games/get", gameHandler.GetGame)
+	router := gamehttp.NewRouter(gameHandler, wsHandler)
 
 	log.Println("Chess Service running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8080", router))
 }
